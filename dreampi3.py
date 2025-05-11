@@ -7,7 +7,6 @@ import subprocess
 import time
 import sys
 import sh
-import argparse
 from datetime import datetime
 
 def graphic():
@@ -20,97 +19,98 @@ def graphic():
     print("        Original idea/code by Luke Benstead          ")
     print("")
 
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--device', default="ttyACM0", help='Modem device (e.g., ttyACM0)')
-    parser.add_argument('--ring-timeout', type=int, default=2, help='Time to wait after ring before answering')
-    return parser.parse_args()
+MODEM_DEVICE = "ttyACM0" 
 
-def runMgetty(device):
-    result = subprocess.Popen(['sudo', '/sbin/mgetty', '-s', '115200', '-D', f'/dev/{device}'], capture_output=True)
-    if result.returncode != 0:
-        logging.error(f"Erro ao iniciar mgetty: {result.stderr.decode()}")
+def runMgetty():
+    subprocess.Popen(['sudo', '/sbin/mgetty', '-s', '115200', '-D', '/dev/'+MODEM_DEVICE],
+        shell=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE)
 
 def send_command(modem, command):
-    final_command = (f"{command}\r\n").encode('utf-8')
+    final_command = ("%s\r\n" % command).encode('utf-8')
     modem.write(final_command)
-    logging.info(f"Sent: {command}")
+    logging.info(command)
 
+    line = modem.readline().decode('utf-8', errors='ignore')
     while True:
-        line = modem.readline().decode('utf-8', errors='ignore')
-        if any(status in line for status in ["OK", "ERROR", "CONNECT"]):
-            logging.info(f"Modem Response: {line.strip()}")
+        if "OK" in line or "ERROR" in line or "CONNECT" in line:
+            logging.info(line.strip())
             break
 
+        line = modem.readline().decode('utf-8', errors='ignore')
+        
 def killMgetty():
     subprocess.Popen(['sudo', 'killall', '-USR1', 'mgetty'])
 
-def modemConnect(device):
-    logging.info("Connecting to modem...")
-    return serial.Serial(f"/dev/{device}", 460800, timeout=0)
+def modemConnect():
+    logging.info("Connecting to modem...:")
+    dev = serial.Serial("/dev/" + MODEM_DEVICE, 460800, timeout=0)
+    logging.info("Connected.")
+    return dev
 
-def initModem(device):
-    with modemConnect(device) as modem:
-        send_command(modem, "ATZE1")  # Reset
-        send_command(modem, "AT+FCLASS=8")  # Voice mode
-        send_command(modem, "AT+VLS=1")  # Go online
+def initModem():
+    modem = modemConnect()
 
-        if "--enable-dial-tone" in sys.argv:
-            print("Dial tone enabled, starting transmission...")
-            send_command(modem, "AT+VTX=1")
+    send_command(modem, "ATZE1") # RESET
+    send_command(modem, "AT+FCLASS=8")  # Switch to Voice mode
+    send_command(modem, "AT+VLS=1") # Go online
 
-        logging.info("Setup complete, listening...")
+    if "--enable-dial-tone" in sys.argv:
+        print("Dial tone enabled, starting transmission...")
+        send_command(modem, "AT+VTX=1") # Transmit audio (for dial tone)
+
+    logging.info("Setup complete, listening...")
     return modem
 
 def main():
-    args = parse_args()
     graphic()
-
-    device = args.device
-    ring_timeout = args.ring_timeout
-
-    modem = modemConnect(device)
+    modem = initModem()
     timeSinceDigit = None
     mode = "LISTENING"
 
     while True:
         if mode == "LISTENING":
-            if timeSinceDigit:
+            if timeSinceDigit is not None:
                 now = datetime.now()
-                if (now - timeSinceDigit).total_seconds() > ring_timeout:
+                delta = (now - timeSinceDigit).total_seconds()
+                if delta > 2:
                     logging.info("Answering call...")
-                    runMgetty(device)
+                    runMgetty()
                     time.sleep(4)
                     killMgetty()
                     logging.info("Call answered!")
-
                     for line in sh.tail("-f", "/var/log/syslog", "-n", "1", _iter=True):
-                        logging.info(line.strip())
+                        logging.info("line")
+                        logging.info(line)
                         if "remote IP address" in line:
                             logging.info("Connected!")
                             mode = "CONNECTED"
                         if "Modem hangup" in line:
-                            logging.info("Detected modem hang up, resetting...")
+                            logging.info("Detected modem hang up, going back to listening")
                             time.sleep(10)
                             timeSinceDigit = None
                             mode = "LISTENING"
                             modem.close()
-                            modem = modemConnect(device)
+                            modem = initModem()
                             break
-
+            
             char = modem.read(1)
             if not char:
                 continue
-
-            if ord(char) == 16:  # DTMF signal detected
+            
+            if ord(char) == 16:
                 try:
                     char = modem.read(1)
                     digit = int(char.decode('utf-8', errors='ignore'))
                     timeSinceDigit = datetime.now()
-                    print(f"Received digit: {digit}")
+                    print("%s" % digit)
                 except (TypeError, ValueError):
                     pass
 
+    return 0
+
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+    logging.getLogger().setLevel(logging.INFO)
+    logging.getLogger().addHandler(logging.StreamHandler())
     sys.exit(main())
