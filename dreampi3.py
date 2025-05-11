@@ -27,7 +27,7 @@ def parse_args():
     return parser.parse_args()
 
 def runMgetty(device):
-    result = subprocess.run(['sudo', '/sbin/mgetty', '-s', '115200', '-D', f'/dev/{device}'], capture_output=True)
+    result = subprocess.Popen(['sudo', '/sbin/mgetty', '-s', '115200', '-D', f'/dev/{device}'], capture_output=True)
     if result.returncode != 0:
         logging.error(f"Erro ao iniciar mgetty: {result.stderr.decode()}")
 
@@ -43,7 +43,7 @@ def send_command(modem, command):
             break
 
 def killMgetty():
-    subprocess.run(['sudo', 'killall', '-USR1', 'mgetty'])
+    subprocess.Popen(['sudo', 'killall', '-USR1', 'mgetty'])
 
 def modemConnect(device):
     logging.info("Connecting to modem...")
