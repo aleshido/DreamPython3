@@ -1,5 +1,6 @@
 #!/bin/bash
-sudo apt-get install -y mgetty ppp
+sudo apt-get install -y mgetty ppp python3-pip
+
 
 sudo rm /etc/ppp/options
 sudo touch /etc/ppp/options
@@ -21,6 +22,7 @@ if [ -z "$MODEM_TTY" ]; then
     echo "Erro: Modem não detectado. Saindo do script."
     exit 1
 fi
+
 DC_IP=$(hostname -I | awk '{print $1}')
 NETMASK=255.255.255.0
 
@@ -47,7 +49,22 @@ data-only y
 issue-file /etc/issue.mgetty
 EOF
 
-# sudo useradd -G dialout,dip,users -c "Dreamcast user" -d /home/dreams -g users -s /usr/sbin/pppd dreams
+if [ -f ./dreampi3.py ]; then
+    echo "Iniciando dreampi3.py..."
+    chmod +x ./dreampi3.py
+    if ! command -v python3 &> /dev/null; then
+        echo "python3 não encontrado. Instalando..."
+        sudo apt-get install -y python3
+    fi
+    if ! dpkg -s python3-sh &> /dev/null; then
+        echo "python3-sh não encontrado. Instalando..."
+        sudo apt-get install -y python3-sh
+    fi
+    sudo python3 ./dreampi3.py --device $MODEM_TTY &
+else
+    echo "Script dreampi3.py não encontrado."
+fi
+
 # sudo useradd -G dialout,dip,users -c "Dreamcast user" -d /home/dreams -g users -s /usr/sbin/pppd dreams
 # sudo passwd dreams
 # sudo passwd 900418F2C6AC@uk.dkey
