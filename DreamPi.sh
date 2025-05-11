@@ -51,16 +51,7 @@ EOF
 
 if [ -f ./dreampi3.py ]; then
     echo "Iniciando dreampi3.py..."
-    chmod +x ./dreampi3.py
-    if ! command -v python3 &> /dev/null; then
-        echo "python3 não encontrado. Instalando..."
-        sudo apt-get install -y python3
-    fi
-    if ! dpkg -s python3-sh &> /dev/null; then
-        echo "python3-sh não encontrado. Instalando..."
-        sudo apt-get install -y python3-sh
-    fi
-    sudo python3 ./dreampi3.py --device $MODEM_TTY &
+    sudo python3 dreampi3.py
 else
     echo "Script dreampi3.py não encontrado."
 fi
