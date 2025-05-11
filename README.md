@@ -6,6 +6,16 @@ Script that automates the modem configuration and makes the listener compatible 
 - Original script by Petri Trebilcock
 - Python 3 port and improved logging in collaboration with [Paula Fleck](https://github.com/paulakfleck)
 
-## Project Structure
-- tests/: Test files
-- docs/: Documentation
+## Installation & Usage
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/aleshido/DreamPython3.git
+   ```
+2. Make the script executable:
+   ```bash
+   chmod +x DreamPi.sh
+   ```
+3. Run the script:
+   ```bash
+   ./DreamPi.sh
+   ```
