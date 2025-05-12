@@ -18,6 +18,15 @@ This script is designed to run on modern Ubuntu OS systems as an alternative to 
 - Original script by Petri Trebilcock
 - Python 3 port and improved logging in collaboration with [Paula Fleck](https://github.com/paulakfleck)
 
+
+## Ubuntu Security Note
+Due to Ubuntu security constraints, you might need to manually create the 'dreams' user and set its password using the following commands:
+```bash
+sudo useradd -G dialout,dip,users -c "Dreamcast user" -d /home/dreams -g users -s /usr/sbin/pppd dreams
+sudo passwd dreams
+```
+Set the password to: dreamcast
+
 ## Installation & Usage
 1. Clone the repository:
    ```bash
