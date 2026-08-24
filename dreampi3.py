@@ -8,7 +8,7 @@ import logging
 import subprocess
 import time
 import sys
-import sh
+import select
 from datetime import datetime
 
 def graphic():
@@ -113,7 +113,7 @@ def releaseModem(modem):
 
 def modemConnect():
     logging.info("Connecting to modem...:")
-    dev = serial.Serial("/dev/" + MODEM_DEVICE, 460800, timeout=0)
+    dev = serial.Serial("/dev/" + MODEM_DEVICE, 460800, timeout=0.1)
     logging.info("Connected.")
     return dev
 
@@ -130,6 +130,53 @@ def initModem():
 
     logging.info("Setup complete, listening...")
     return modem
+
+CONNECT_TIMEOUT = 90          # seconds to wait for PPP to come up
+LINK_FAILED = ("Authentication failed", "Connection terminated", "LCP TermReq")
+
+def followLog():
+    """Start following the system log, line-buffered."""
+    return subprocess.Popen(LOG_FOLLOW, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL)
+
+def waitForLink(proc, timeout=CONNECT_TIMEOUT):
+    """Watch the log for the outcome of a call.
+
+    Returns "CONNECTED", "FAILED" or "TIMEOUT". Bounded, so a call that never
+    negotiates cannot strand the listener.
+    """
+    deadline = time.time() + timeout
+    fd = proc.stdout.fileno()
+    buf = ""
+    while time.time() < deadline:
+        # Read the raw fd: a buffered readline() could pull several lines into
+        # Python's buffer, and select() would then not report the fd readable
+        # again, hiding a line we are waiting for.
+        ready, _, _ = select.select([fd], [], [], 1.0)
+        if not ready:
+            continue
+        data = os.read(fd, 4096)
+        if not data:
+            break
+        buf += data.decode("utf-8", errors="ignore")
+        lines = buf.split("\n")
+        buf = lines.pop()          # keep any partial trailing line
+        for line in lines:
+            logging.info(line)
+            if "remote IP address" in line:
+                return "CONNECTED"
+            if any(s in line for s in LINK_FAILED):
+                return "FAILED"
+    return "TIMEOUT"
+
+def linkIsUp():
+    """True while a pppd session owns the modem.
+
+    pppd liveness is used instead of matching a log string: the "Modem hangup"
+    message the original code waited for is not what pppd actually emits.
+    """
+    return subprocess.call(["pgrep", "-x", "pppd"],
+                           stdout=subprocess.DEVNULL) == 0
 
 def main():
     graphic()
@@ -148,24 +195,36 @@ def main():
                 delta = (now - timeSinceDigit).total_seconds()
                 if delta > 2:
                     logging.info("Answering call...")
-                    releaseModem(modem)
-                    runMgetty()
-                    time.sleep(4)
-                    killMgetty()
-                    logging.info("Call answered!")
-                    for line in sh.Command(LOG_FOLLOW[0])(*LOG_FOLLOW[1:], _iter=True):
-                        logging.info(line)
-                        if "remote IP address" in line:
+                    # Started before mgetty so pppd's "remote IP address" cannot
+                    # be logged before we are watching for it.
+                    follower = followLog()
+                    try:
+                        releaseModem(modem)
+                        runMgetty()
+                        time.sleep(4)
+                        killMgetty()
+                        logging.info("Call answered!")
+
+                        result = waitForLink(follower)
+                        if result == "CONNECTED":
                             logging.info("Connected!")
                             mode = "CONNECTED"
-                        if "Modem hangup" in line:
-                            logging.info("Detected modem hang up, going back to listening")
+                            while linkIsUp():   # a session may last hours
+                                time.sleep(2)
+                            logging.info("Link closed, going back to listening")
+                        else:
+                            logging.info("Call did not establish (%s)" % result)
                             time.sleep(10)
-                            timeSinceDigit = None
-                            mode = "LISTENING"
-                            modem.close()
-                            modem = initModem()
-                            break
+                    finally:
+                        follower.terminate()
+                        try:
+                            follower.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            follower.kill()
+
+                    timeSinceDigit = None
+                    mode = "LISTENING"
+                    modem = initModem()   # releaseModem() closed it
 
             char = modem.read(1)
             if not char:

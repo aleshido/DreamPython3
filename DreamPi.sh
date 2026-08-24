@@ -30,7 +30,7 @@ else
 fi
 
 # Package names happen to be identical on Debian and Fedora family distros.
-for pkg in ppp mgetty python3-sh; do
+for pkg in ppp mgetty; do
     if ! $PKG_CHECK "$pkg" &> /dev/null; then
         echo "Installing missing package: $pkg"
         sudo $PKG_INSTALL "$pkg"

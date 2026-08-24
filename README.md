@@ -13,7 +13,7 @@ Detection probes for **commands and files** rather than reading the `ID` field o
 | Concern | Debian/Ubuntu | Fedora family |
 |---|---|---|
 | Package manager | `apt-get` / `dpkg -s` | `dnf` / `rpm -q` |
-| Package names | `ppp mgetty python3-sh` | identical |
+| Package names | `ppp mgetty` | identical |
 | mgetty config dir | `/etc/mgetty` | `/etc/mgetty+sendfax` |
 | System log | `/var/log/syslog` | `/var/log/messages` (or `journalctl`) |
 | `mgetty` / `pppd` | `/usr/sbin/...` | `/usr/bin/...` |
@@ -179,15 +179,23 @@ remote IP address 192.168.1.200
   full-duplex `AT+VTR` with a synthesised 350+440 Hz tone streamed at 8 kHz
   (DLE-escaping `0x10` in the payload) and the tone cut on the first detected digit.
 
-- **`Connected!` is not always reported.** The listener follows the log with `-n 0`
-  (new entries only) and can race past pppd's `remote IP address` line, leaving the
-  state machine in `LISTENING` even though the link is up. The link itself is
-  unaffected, but the `Modem hangup` detection shares this weakness.
+- **Fixed: `Connected!` was not always reported.** The log follow was started after
+  mgetty with `-n 0` (new entries only), so pppd's `remote IP address` could be logged
+  before anything was watching for it. The follow now starts *before* mgetty.
 
-- **The listener blocks after answering.** Once in the log-follow loop it only exits on
-  `remote IP address` or `Modem hangup`. If PPP never starts, neither string appears and
-  the script waits forever instead of returning to listening - it needs a restart. A
-  timeout would make it self-recover.
+- **Fixed: the listener blocked after answering.** The follow loop only exited on
+  `remote IP address` or `Modem hangup`, so a call that failed mid-PPP stranded the
+  script and it stopped watching the modem entirely. `waitForLink()` is now bounded by
+  `CONNECT_TIMEOUT` (90s) and also recognises pppd's failure messages, so the listener
+  always returns to listening on its own.
+
+  Note that `Modem hangup` never actually appears - pppd logs `Connection terminated`.
+  End of a live session is now detected by checking whether pppd is still running
+  (`linkIsUp()`) rather than by matching a log string.
+
+- **Fixed: idle CPU spin.** The serial port was opened with `timeout=0`, so `read(1)`
+  returned instantly and the listen loop consumed ~100% of a core. It now uses
+  `timeout=0.1`, which drops idle usage to near zero - worth having on a Raspberry Pi.
 
 - **ModemManager may claim the modem.** It probes `ttyACM*` devices (`ID_MM_CANDIDATE=1`)
   and can hijack the port mid-call. To exclude the modem, create
