@@ -1,22 +1,81 @@
 #!/bin/bash
 
-# 1. Dependency Checks
-if [ ! -f /var/lib/apt/periodic/update-success-stamp ]; then
-    echo "Running apt-get update..."
-    sudo apt-get update
+# ---------------------------------------------------------------------------
+# 0. Platform detection - phase A (package tooling)
+#
+# Probe for commands and files rather than parsing /etc/os-release: derivatives
+# report their own ID (Nobara reports ID=nobara, not fedora), so an ID check
+# would fail on the very systems we want to support.
+# ---------------------------------------------------------------------------
+if command -v apt-get >/dev/null 2>&1; then
+    PKG_CHECK="dpkg -s"
+    PKG_INSTALL="apt-get install -y"
+    PKG_UPDATE="apt-get update"
+elif command -v dnf >/dev/null 2>&1; then
+    PKG_CHECK="rpm -q"
+    PKG_INSTALL="dnf install -y"
+    PKG_UPDATE="dnf makecache"
+else
+    echo "Error: no supported package manager found (apt-get or dnf). Exiting."
+    exit 1
 fi
 
+# 1. Dependency Checks
+# The apt timestamp is Debian-only; on other distros just refresh metadata.
+if [ "$PKG_CHECK" = "dpkg -s" ] && [ -f /var/lib/apt/periodic/update-success-stamp ]; then
+    : # package lists were refreshed recently
+else
+    echo "Refreshing package metadata..."
+    sudo $PKG_UPDATE
+fi
+
+# Package names happen to be identical on Debian and Fedora family distros.
 for pkg in ppp mgetty python3-sh; do
-    if ! dpkg -s $pkg &> /dev/null; then
+    if ! $PKG_CHECK "$pkg" &> /dev/null; then
         echo "Installing missing package: $pkg"
-        sudo apt-get install -y $pkg
+        sudo $PKG_INSTALL "$pkg"
     fi
 done
 
+# ---------------------------------------------------------------------------
+# 1b. Platform detection - phase B (paths)
+#
+# Must run AFTER installation: mgetty's config directory only exists once the
+# package is on disk, so probing earlier would always miss it.
+# ---------------------------------------------------------------------------
+for d in /etc/mgetty+sendfax /etc/mgetty; do
+    if [ -d "$d" ]; then
+        MGETTY_CONF_DIR="$d"
+        break
+    fi
+done
+MGETTY_CONF_DIR="${MGETTY_CONF_DIR:-/etc/mgetty}"
+sudo mkdir -p "$MGETTY_CONF_DIR"
+
+PPPD_BIN="$(command -v pppd 2>/dev/null)"
+if [ -z "$PPPD_BIN" ]; then
+    for p in /usr/sbin/pppd /sbin/pppd /usr/bin/pppd; do
+        if [ -x "$p" ]; then
+            PPPD_BIN="$p"
+            break
+        fi
+    done
+fi
+
+if [ -z "$PPPD_BIN" ]; then
+    echo "Error: pppd not found after install. Exiting."
+    exit 1
+fi
+
+echo "Using mgetty config dir: $MGETTY_CONF_DIR"
+echo "Using pppd:              $PPPD_BIN"
+
 # 2. PPP Configuration
+# 'lock' is shipped by the distro default and is worth keeping.
 sudo rm -f /etc/ppp/options
 sudo touch /etc/ppp/options
 sudo bash -c "cat > /etc/ppp/options" <<EOF
+lock
 debug
 login
 require-pap
@@ -26,14 +85,22 @@ ktune
 EOF
 
 # 3. Network Configuration
+# Probe the device nodes that actually exist. Grepping dmesg history picks the
+# most recently *mentioned* tty, which may be a device that has since vanished.
 echo "Detecting modem..."
-MODEM_TTY=$(sudo dmesg | grep -oP 'tty(ACM|USB)[0-9]+' | tail -n1)
-echo "Modem detected: $MODEM_TTY"
+MODEM_TTY=""
+for d in /dev/ttyACM* /dev/ttyUSB*; do
+    if [ -e "$d" ]; then
+        MODEM_TTY="$(basename "$d")"
+        break
+    fi
+done
 
 if [ -z "$MODEM_TTY" ]; then
     echo "Error: Modem not detected. Exiting."
     exit 1
 fi
+echo "Modem detected: $MODEM_TTY"
 
 PC_IP=192.168.1.20
 DC_IP=192.168.1.200
@@ -45,14 +112,14 @@ netmask $NETMASK
 EOF
 
 # 4. PAP Secrets Configuration
-if ! grep -q '^dreams \* dreamcast \*' /etc/ppp/pap-secrets; then
+if ! sudo grep -q '^dreams \* dreamcast \*' /etc/ppp/pap-secrets; then
     sudo bash -c "echo 'dreams * dreamcast *' >> /etc/ppp/pap-secrets"
 fi
 
 # 5. mgetty Configuration
-sudo rm -f /etc/mgetty/mgetty.config
-sudo touch /etc/mgetty/mgetty.config
-sudo bash -c "cat > /etc/mgetty/mgetty.config" <<EOF
+sudo rm -f "$MGETTY_CONF_DIR/mgetty.config"
+sudo touch "$MGETTY_CONF_DIR/mgetty.config"
+sudo bash -c "cat > $MGETTY_CONF_DIR/mgetty.config" <<EOF
 debug 4
 fax-id
 speed 115200
@@ -61,9 +128,44 @@ data-only y
 issue-file /etc/issue.mgetty
 EOF
 
+# 5b. mgetty AutoPPP Configuration
+# When mgetty sees an LCP configure request it looks up the magic '/AutoPPP/'
+# user in login.config. Distros ship that entry commented out, so the call
+# falls through to the '*' catch-all and lands in /bin/login, which cannot read
+# PPP frames - the Dreamcast connects at carrier level and then stalls.
+LOGIN_CONF="$MGETTY_CONF_DIR/login.config"
+AUTOPPP_LINE="/AutoPPP/ - a_ppp $PPPD_BIN auth -chap +pap login debug"
+if [ -f "$LOGIN_CONF" ]; then
+    if ! sudo grep -qE '^[[:space:]]*/AutoPPP/' "$LOGIN_CONF"; then
+        echo "Enabling AutoPPP in $LOGIN_CONF"
+        # mgetty uses the FIRST matching rule, so this must be inserted above
+        # the '*' catch-all - appending it would leave it unreachable.
+        if sudo grep -qE '^\*' "$LOGIN_CONF"; then
+            sudo sed -i "0,/^\*/s|^\*|$AUTOPPP_LINE\n*|" "$LOGIN_CONF"
+        else
+            sudo bash -c "printf '%s\n' '$AUTOPPP_LINE' >> '$LOGIN_CONF'"
+        fi
+    fi
+else
+    echo "Warning: $LOGIN_CONF not found, skipping AutoPPP setup."
+fi
+
 # 6. User Creation
+# useradd aborts if any group passed to -G is missing, so only list the ones
+# that exist ('dip' is a Debian convention and may be absent elsewhere).
 if ! id "dreams" &>/dev/null; then
-    sudo useradd -G dialout,dip,users -c "Dreamcast user" -d /home/dreams -g users -s /usr/sbin/pppd dreams
+    GRPS=""
+    for g in dialout dip users; do
+        if getent group "$g" >/dev/null 2>&1; then
+            GRPS="${GRPS:+$GRPS,}$g"
+        fi
+    done
+
+    PRIMARY_GRP="users"
+    getent group "$PRIMARY_GRP" >/dev/null 2>&1 || PRIMARY_GRP=""
+
+    sudo useradd ${GRPS:+-G "$GRPS"} -c "Dreamcast user" -d /home/dreams \
+        ${PRIMARY_GRP:+-g "$PRIMARY_GRP"} -s "$PPPD_BIN" dreams
     echo "dreams:dreamcast" | sudo chpasswd
 fi
 
