@@ -46,11 +46,17 @@ sudo MODEM_TTY=ttyACM1 MGETTY_BIN=/usr/bin/mgetty python3 dreampi3.py
 
 ## Dreamcast Settings
 
-Two console-side settings matter, and both can silently prevent a connection.
+**Nothing needs configuring on the console.** The script generates a real dial tone
+and accepts any credentials, so a Dreamcast connects on stock settings. This matters
+for titles that expose no modem init string at all - Quake III Arena among them.
 
-### Dial mode: use `ATX3`
+The rest of this section is only relevant if your modem refuses full duplex, which the
+script reports at startup.
 
-Add `ATX3` to the Dreamcast's modem AT init string. `ATXn` controls call progress
+### Dial mode: `ATX3` (fallback only)
+
+If `AT+VTR` is refused, no dial tone can be produced and the console must be told not
+to wait for one. Add `ATX3` to its modem AT init string. `ATXn` controls call progress
 monitoring:
 
 | Setting | Waits for dial tone | Detects busy |
@@ -61,10 +67,9 @@ monitoring:
 | `X3` | **no (blind)** | yes |
 | `X4` | **yes** | yes |
 
-The USB modem does not generate a dial tone (see Known Issues), so a console left on
-`X2`/`X4` waits, hears silence, and hangs up after ~2 seconds - producing no DTMF at
-all. `X3` makes it dial immediately. If `X3` still aborts calls, try `X0`, which also
-disables busy detection.
+Without a dial tone, a console left on `X2`/`X4` waits, hears silence and hangs up
+after ~2 seconds - producing no DTMF at all. `X3` makes it dial immediately. If `X3`
+still aborts calls, try `X0`, which also disables busy detection.
 
 ### Credentials
 
@@ -139,6 +144,32 @@ sudo ufw allow in on ppp0
 Also make sure your router does **not** hand out `192.168.1.20` or `192.168.1.200`
 from its DHCP pool, since both are assigned statically to the PPP link.
 
+## Game Servers and DNS
+
+The original game servers are long gone. A revival service runs replacements and
+publishes a DNS resolver that maps the old hostnames onto them - handing the console a
+general-purpose resolver such as `8.8.8.8` instead will let it connect and then find
+nothing.
+
+`DreamPi.sh` sets this near the top:
+
+```bash
+DNS_SERVER=46.101.91.123        # Dreamcast Live
+```
+
+Change it if you use a different service. It is handed to the console via IPCP, which
+you can confirm in the pppd log:
+
+```
+sent [IPCP ConfNak <ms-dns1 46.101.91.123> <ms-dns2 46.101.91.123>]
+```
+
+Not every hostname a game asks for will resolve. PAL discs often query `.dream-key.com`
+names that a US-oriented resolver returns `NXDOMAIN` for; games generally try several
+hostnames and fall back to ones that do resolve, so this is usually harmless. Verified
+working: Quake III Arena (PAL) reaching a live game server on UDP 27960 despite two
+`NXDOMAIN` lookups along the way.
+
 ## Verifying a connection
 
 ```bash
@@ -159,12 +190,12 @@ remote IP address 192.168.1.200
 
 ## Known Issues / To-Do
 
-- **No dial tone is generated.** `AT+VTX=1` puts the modem into transmit mode but never
-  streams any audio, and it is half-duplex so the modem cannot detect DTMF while
-  transmitting. Setting the console to blind dial (`ATX3`, above) avoids the problem
-  entirely and is the recommended fix. If you need a real dial tone, it requires
-  full-duplex `AT+VTR` with a synthesised 350+440 Hz tone streamed at 8 kHz
-  (DLE-escaping `0x10` in the payload) and the tone cut on the first detected digit.
+- **Fixed: no dial tone was generated.** `AT+VTX=1` put the modem into transmit mode
+  but streamed no audio, and being half-duplex it could not decode DTMF while
+  transmitting - so the flag could never have worked. The script now synthesises a
+  350+440 Hz tone over full-duplex `AT+VTR`, cutting it on the first digit as a real
+  exchange does. Pass `--no-dial-tone` to disable it. If the modem refuses `AT+VTR` the
+  script says so and falls back to half duplex, where `ATX3` is required on the console.
 
 - **Fixed: `Connected!` was not always reported.** The log follow was started after
   mgetty with `-n 0` (new entries only), so pppd's `remote IP address` could be logged
@@ -176,9 +207,10 @@ remote IP address 192.168.1.200
   `CONNECT_TIMEOUT` (90s) and also recognises pppd's failure messages, so the listener
   always returns to listening on its own.
 
-  Note that `Modem hangup` never actually appears - pppd logs `Connection terminated`.
-  End of a live session is now detected by checking whether pppd is still running
-  (`linkIsUp()`) rather than by matching a log string.
+  Link teardown is detected by checking whether pppd is still running (`linkIsUp()`)
+  rather than by matching a log string. pppd does log `Modem hangup` on a clean,
+  peer-initiated disconnect, but not when authentication fails - which was precisely
+  the case that used to strand the listener. Watching the process covers both.
 
 - **Fixed: idle CPU spin.** The serial port was opened with `timeout=0`, so `read(1)`
   returned instantly and the listen loop consumed ~100% of a core. It now uses

@@ -71,6 +71,13 @@ echo "Using mgetty config dir: $MGETTY_CONF_DIR"
 echo "Using pppd:              $PPPD_BIN"
 
 # 2. PPP Configuration
+# DNS handed to the Dreamcast via IPCP. The original game servers are long gone,
+# so this must point at a revival service's resolver, which maps the old
+# hostnames onto community-run replacements. A general-purpose resolver such as
+# 8.8.8.8 will resolve those hostnames to nothing useful and the console will
+# connect but find no servers.
+DNS_SERVER=46.101.91.123        # Dreamcast Live
+
 # 'lock' is shipped by the distro default and is worth keeping.
 sudo rm -f /etc/ppp/options
 sudo touch /etc/ppp/options
@@ -78,7 +85,7 @@ sudo bash -c "cat > /etc/ppp/options" <<EOF
 lock
 debug
 require-pap
-ms-dns 8.8.8.8
+ms-dns $DNS_SERVER
 proxyarp
 ktune
 EOF
