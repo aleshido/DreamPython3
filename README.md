@@ -142,7 +142,7 @@ from its DHCP pool, since both are assigned statically to the PPP link.
 ## Verifying a connection
 
 ```bash
-journalctl -f -t pppd            # watch negotiation
+journalctl -f -t pppd -t mgetty  # watch negotiation (same filter the script uses)
 ip -brief addr show ppp0         # expect: 192.168.1.20 peer 192.168.1.200/32
 ping 192.168.1.200               # the console itself
 ip neigh show proxy              # expect: 192.168.1.200 dev <lan-if> proxy

@@ -54,9 +54,15 @@ def _detect_log_follow():
     journalctl is preferred because it captures every priority. Typical rsyslog
     rules are '*.info', which drop LOG_DEBUG - if a message we wait for were
     logged at debug level the state machine would block forever.
+
+    Output is filtered to pppd and mgetty. Everything the state machine looks
+    for comes from pppd, and mgetty supplies the answer/carrier context; without
+    the filter roughly two thirds of the lines printed during a call are
+    unrelated system noise. The syslog fallback below cannot filter this way.
     """
     if shutil.which("journalctl"):
-        return ["journalctl", "-f", "-n", "0", "-o", "cat"]
+        return ["journalctl", "-f", "-n", "0", "-o", "cat",
+                "-t", "pppd", "-t", "mgetty"]
     for path in ("/var/log/syslog", "/var/log/messages"):
         if os.path.exists(path):
             return ["tail", "-f", "-n", "1", path]
