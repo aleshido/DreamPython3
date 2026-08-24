@@ -77,7 +77,6 @@ sudo touch /etc/ppp/options
 sudo bash -c "cat > /etc/ppp/options" <<EOF
 lock
 debug
-login
 require-pap
 ms-dns 8.8.8.8
 proxyarp
@@ -112,8 +111,17 @@ netmask $NETMASK
 EOF
 
 # 4. PAP Secrets Configuration
-if ! sudo grep -q '^dreams \* dreamcast \*' /etc/ppp/pap-secrets; then
-    sudo bash -c "echo 'dreams * dreamcast *' >> /etc/ppp/pap-secrets"
+# Accept whatever credentials the Dreamcast sends. The console always supplies a
+# username and password, but which ones is not reliably under the user's control
+# (consoles ship with defaults such as profile/eliforp, and the sign-up flow uses
+# a different name again). A '*' client matches any name and a "" secret matches
+# any password, so no per-user setup is needed.
+#
+# Note: do not add a more specific line alongside this one. pppd picks the match
+# with the fewest wildcards, so an exact entry would shadow this and become the
+# only username that can be rejected.
+if ! sudo grep -qE '^\*[[:space:]]+\*' /etc/ppp/pap-secrets; then
+    sudo bash -c "printf '%s\t%s\t%s\t%s\n' '*' '*' '\"\"' '*' >> /etc/ppp/pap-secrets"
 fi
 
 # 5. mgetty Configuration
@@ -134,7 +142,7 @@ EOF
 # falls through to the '*' catch-all and lands in /bin/login, which cannot read
 # PPP frames - the Dreamcast connects at carrier level and then stalls.
 LOGIN_CONF="$MGETTY_CONF_DIR/login.config"
-AUTOPPP_LINE="/AutoPPP/ - a_ppp $PPPD_BIN auth -chap +pap login debug"
+AUTOPPP_LINE="/AutoPPP/ - a_ppp $PPPD_BIN auth -chap +pap debug"
 if [ -f "$LOGIN_CONF" ]; then
     if ! sudo grep -qE '^[[:space:]]*/AutoPPP/' "$LOGIN_CONF"; then
         echo "Enabling AutoPPP in $LOGIN_CONF"
@@ -150,26 +158,7 @@ else
     echo "Warning: $LOGIN_CONF not found, skipping AutoPPP setup."
 fi
 
-# 6. User Creation
-# useradd aborts if any group passed to -G is missing, so only list the ones
-# that exist ('dip' is a Debian convention and may be absent elsewhere).
-if ! id "dreams" &>/dev/null; then
-    GRPS=""
-    for g in dialout dip users; do
-        if getent group "$g" >/dev/null 2>&1; then
-            GRPS="${GRPS:+$GRPS,}$g"
-        fi
-    done
-
-    PRIMARY_GRP="users"
-    getent group "$PRIMARY_GRP" >/dev/null 2>&1 || PRIMARY_GRP=""
-
-    sudo useradd ${GRPS:+-G "$GRPS"} -c "Dreamcast user" -d /home/dreams \
-        ${PRIMARY_GRP:+-g "$PRIMARY_GRP"} -s "$PPPD_BIN" dreams
-    echo "dreams:dreamcast" | sudo chpasswd
-fi
-
-# 7. Start Python Script if available
+# 6. Start Python Script if available
 if [ -f ./dreampi3.py ]; then
     echo "Starting dreampi3.py..."
     sudo python3 dreampi3.py

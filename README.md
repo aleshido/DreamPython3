@@ -42,7 +42,7 @@ sudo MODEM_TTY=ttyACM1 MGETTY_BIN=/usr/bin/mgetty python3 dreampi3.py
 - Modem: Tested with a Conexant CX93001 USB modem on ttyACM0 (auto-detected)
 - DNS: Uses Google DNS (8.8.8.8)
 - Network: Sets IP to 192.168.1.20:192.168.1.200 in /etc/ppp/options.<tty> - you may need to change these if the addresses are already in use on your network.
-- Authentication: see "Dreamcast Settings" below.
+- Authentication: any username/password is accepted - see "Dreamcast Settings" below.
 
 ## Dreamcast Settings
 
@@ -68,46 +68,33 @@ disables busy detection.
 
 ### Credentials
 
-The script creates a `dreams` / `dreamcast` account. Enter those in your Dreamcast's
-ISP settings.
+**Enter anything.** The console requires a username and password, but the PC accepts
+whatever it sends - `dreams` / `dreamcast` is the suggested convention, and works
+because everything works.
 
-If your console cannot save new settings until it validates a connection, you may be
-stuck with whatever it currently sends. Dreamcast consoles often ship with the stock
-pair **`profile` / `eliforp`** ("profile" reversed). PAP transmits credentials in
-cleartext, so you can read exactly what yours sends by temporarily adding
-`show-password` to `/etc/ppp/options` and dialling:
+This matters because the credentials a console sends are not reliably under your
+control. Many ship with the stock pair `profile` / `eliforp` ("profile" reversed), the
+ISP sign-up flow authenticates as `signup`, and a console typically will not let you
+save new settings until it has validated a connection at least once - so you cannot
+simply correct them.
+
+`DreamPi.sh` therefore writes a single wildcard line to `/etc/ppp/pap-secrets`:
 
 ```
-rcvd [PAP AuthReq id=0x2 user="profile" password="eliforp"]
+*	*	""	*
 ```
 
-Then create a matching account and secret, and remove `show-password` again:
+A `*` client name matches any name, a `""` secret matches any password, and `*` in the
+address field allows any address. `login` is deliberately absent from
+`/etc/ppp/options`, so no PAM check and no system account is involved.
 
-```bash
-sudo useradd -G dialout,dip,users -c "Dreamcast user" -d /home/profile \
-     -g users -s "$(command -v pppd)" profile
-echo "profile:eliforp" | sudo chpasswd
-echo 'profile * "" *' | sudo tee -a /etc/ppp/pap-secrets
-```
+> **Do not add a more specific line alongside it.** pppd selects the match with the
+> fewest wildcards, so an exact entry such as `dreams * dreamcast *` would shadow the
+> wildcard and make `dreams` the only username that can be *rejected*.
 
-The `""` secret is the documented form when `/etc/ppp/options` contains `login`: it
-matches any password at the secrets layer and defers the real check to PAM.
-
-## Manual User Creation
-
-Some distributions (notably Ubuntu, due to its security constraints) may not create the
-account cleanly from the script. To do it by hand:
-
-```bash
-sudo useradd -G dialout,dip,users -c "Dreamcast user" -d /home/dreams \
-     -g users -s "$(command -v pppd)" dreams
-sudo passwd dreams          # set it to: dreamcast
-```
-
-Use `$(command -v pppd)` rather than a hardcoded path: it is `/usr/sbin/pppd` on
-Debian/Ubuntu and `/usr/bin/pppd` on Fedora-family systems. `DreamPi.sh` detects this
-automatically, and also drops any of `dialout`/`dip`/`users` that do not exist on your
-system - `useradd -G` aborts outright if a listed group is missing.
+To see what your console actually sends - rarely necessary now, but useful when
+debugging - add `show-password` to `/etc/ppp/options` temporarily and dial. PAP is
+cleartext, so the password appears in the log instead of `<hidden>`.
 
 ## mgetty AutoPPP (required)
 
@@ -120,7 +107,7 @@ connects at carrier level and then goes nowhere.
 `*` catch-all (mgetty uses the first matching rule, so appending it does nothing):
 
 ```
-/AutoPPP/ - a_ppp /usr/bin/pppd auth -chap +pap login debug
+/AutoPPP/ - a_ppp /usr/bin/pppd auth -chap +pap debug
 ```
 
 The file lives at `/etc/mgetty+sendfax/login.config` on Fedora-family systems and
@@ -196,6 +183,13 @@ remote IP address 192.168.1.200
 - **Fixed: idle CPU spin.** The serial port was opened with `timeout=0`, so `read(1)`
   returned instantly and the listen loop consumed ~100% of a core. It now uses
   `timeout=0.1`, which drops idle usage to near zero - worth having on a Raspberry Pi.
+
+- **Authentication is deliberately open.** `/etc/ppp/pap-secrets` accepts any username
+  and password from any address, and `login` is not set, so nothing is checked against
+  the system. Reaching that line needs physical access to the modem's phone line, but
+  note that `proxyarp` places the connected peer on your LAN. If you want it narrowed,
+  replace the trailing `*` with the peer address (`192.168.1.200` by default) so a
+  client may only claim that one address.
 
 - **ModemManager may claim the modem.** It probes `ttyACM*` devices (`ID_MM_CANDIDATE=1`)
   and can hijack the port mid-call. To exclude the modem, create
