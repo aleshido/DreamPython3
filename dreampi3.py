@@ -96,15 +96,20 @@ DLE, ETX = 0x10, 0x03
 # Useful when a console refuses to dial and you need to know whether it ever
 # went off-hook at all.
 DEBUG_LINE = "--debug-line" in sys.argv
-TX_GAIN = os.environ.get("TX_GAIN", "128")   # modem default
+TX_GAIN = os.environ.get("TX_GAIN", "200")
 
 # The tone desensitises the modem's DTMF detector, so it has to stop as soon as
 # the console starts dialling - not once a digit has been decoded, which would
 # deadlock: tone blocks detection, so nothing is decoded, so the tone never
 # stops. A real exchange cuts dial tone on the first dialling energy it sees.
 # Idle level (our own echo) measures ~12; a console off-hook pushes it past 25.
-TONE_CUT_LEVEL = float(os.environ.get("TONE_CUT_LEVEL", "20"))
-TONE_RESUME_AFTER = 6.0       # restore the tone if nothing was actually dialled
+TONE_CUT_LEVEL = float(os.environ.get("TONE_CUT_LEVEL", "40"))
+TONE_RESUME_AFTER = float(os.environ.get("TONE_RESUME_AFTER", "6.0"))
+# Hold the tone for a moment AFTER the console picks up. Quake III needs to
+# hear a tone once it is off-hook before it will dial; PSO needs the tone gone
+# before it dials, because it deafens the DTMF detector. Cutting on off-hook
+# serves PSO and starves Quake, so hold briefly, then cut.
+TONE_HOLD = float(os.environ.get("TONE_HOLD", "1.5"))
 VOICE_EVENTS = {
     "R": "RING", "b": "BUSY tone", "d": "DIAL TONE detected",
     "o": "OVERRUN", "s": "SILENCE", "q": "QUIET", "c": "FAX CNG",
@@ -205,9 +210,11 @@ def initModem():
         return modem, False
 
     send_command(modem, "AT+VSM=1,8000")  # 8-bit unsigned PCM @ 8kHz
-    # Transmit gain. The modem default is 128; pushing it higher overdrives the
-    # tone and the returning audio clips at full scale, which some consoles
-    # misread as a busy/reorder cadence rather than dial tone.
+    # Transmit gain. The modem default of 128 is too quiet for some consoles:
+    # Quake III Arena reports no dial tone at that level. 200 works for both
+    # titles tested. The returning echo clips at this gain, which is ugly but
+    # has caused no failure - and TONE_CUT_LEVEL must be scaled alongside it,
+    # since the idle echo level tracks the transmit gain.
     send_command(modem, "AT+VGT=%s" % TX_GAIN)
     send_command(modem, "AT+VLS=1")       # Go online
 
@@ -278,7 +285,8 @@ def newToneState():
     now = time.time()
     return {"pos": 0, "next_tx": now, "on": True, "pending": False,
             "lvl_n": 0, "lvl_sum": 0, "lvl_peak": 0, "lvl_at": now,
-            "log_at": now, "cut_at": 0.0, "got_digit": False}
+            "log_at": now, "cut_at": 0.0, "got_digit": False,
+            "busy_at": 0.0}
 
 def pumpModem(modem, duplex, state):
     """One pass of the listen loop; returns any DTMF digits seen.
@@ -366,13 +374,20 @@ def pumpModem(modem, duplex, state):
         state["lvl_at"] = now
 
         if duplex and state["on"] and avg > TONE_CUT_LEVEL:
-            state["on"] = False       # console is on the line - get out of its way
-            state["cut_at"] = now
-            if DEBUG_LINE:
-                logging.info("LINE: activity (avg=%.1f), cutting dial tone" % avg)
+            if not state["busy_at"]:
+                state["busy_at"] = now
+                if DEBUG_LINE:
+                    logging.info("LINE: off-hook (avg=%.1f), holding tone %.1fs"
+                                 % (avg, TONE_HOLD))
+            elif now - state["busy_at"] >= TONE_HOLD:
+                state["on"] = False   # tone heard; free the DTMF detector
+                state["cut_at"] = now
+                if DEBUG_LINE:
+                    logging.info("LINE: hold elapsed, cutting dial tone")
         elif (duplex and not state["on"] and not state["got_digit"]
               and now - state["cut_at"] > TONE_RESUME_AFTER):
             state["on"] = True        # false alarm - the console still needs it
+            state["busy_at"] = 0.0
             if DEBUG_LINE:
                 logging.info("LINE: nothing dialled, resuming dial tone")
 
