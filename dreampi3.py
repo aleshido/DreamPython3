@@ -103,7 +103,21 @@ TX_GAIN = os.environ.get("TX_GAIN", "200")
 # deadlock: tone blocks detection, so nothing is decoded, so the tone never
 # stops. A real exchange cuts dial tone on the first dialling energy it sees.
 # Idle level (our own echo) measures ~12; a console off-hook pushes it past 25.
-TONE_CUT_LEVEL = float(os.environ.get("TONE_CUT_LEVEL", "40"))
+# Threshold for deciding the console is on the line. Auto-calibrated by
+# default: the idle level is our own tone echoing back, and it scales with
+# TX_GAIN (~12 at gain 128, ~24 at gain 200) and drifts by 30% or more over
+# minutes. A fixed number is therefore only ever right for one gain on one
+# modem. Set TONE_CUT_LEVEL to pin it manually instead.
+TONE_CUT_LEVEL = os.environ.get("TONE_CUT_LEVEL")   # None = auto
+TONE_CUT_FACTOR = float(os.environ.get("TONE_CUT_FACTOR", "1.7"))
+BASELINE_ALPHA = 0.15        # EMA smoothing for the idle baseline
+BASELINE_WARMUP = 2.0        # seconds of samples before the threshold is trusted
+# If the line lifts clearly above the baseline but never clears the threshold,
+# the console is probably dialling and we cannot see it - the usual cause is a
+# transmit gain too low for the echo and the console signal to be separable.
+# Quake III at TX_GAIN=128 sat at 18.4 against a baseline of 12.5, a ratio of
+# 1.47, and simply never triggered. Warn instead of failing silently.
+NEAR_MISS_FACTOR = 1.2
 TONE_RESUME_AFTER = float(os.environ.get("TONE_RESUME_AFTER", "6.0"))
 # Hold the tone for a moment AFTER the console picks up. Quake III needs to
 # hear a tone once it is off-hook before it will dial; PSO needs the tone gone
@@ -286,7 +300,8 @@ def newToneState():
     return {"pos": 0, "next_tx": now, "on": True, "pending": False,
             "lvl_n": 0, "lvl_sum": 0, "lvl_peak": 0, "lvl_at": now,
             "log_at": now, "cut_at": 0.0, "got_digit": False,
-            "busy_at": 0.0}
+            "busy_at": 0.0, "baseline": None, "base_at": now,
+            "near": 0, "warned_at": 0.0}
 
 def pumpModem(modem, duplex, state):
     """One pass of the listen loop; returns any DTMF digits seen.
@@ -373,7 +388,41 @@ def pumpModem(modem, duplex, state):
         state["lvl_n"] = state["lvl_sum"] = state["lvl_peak"] = 0
         state["lvl_at"] = now
 
-        if duplex and state["on"] and avg > TONE_CUT_LEVEL:
+        if state["baseline"] is None:
+            state["baseline"] = avg
+
+        # Derive the threshold from the EXISTING baseline before deciding, so a
+        # sample that turns out to be the console cannot first inflate the
+        # threshold it then has to clear.
+        if TONE_CUT_LEVEL is not None:
+            threshold = float(TONE_CUT_LEVEL)
+        else:
+            threshold = state["baseline"] * TONE_CUT_FACTOR
+        warm = (now - state["base_at"]) >= BASELINE_WARMUP
+        quiet = avg <= threshold
+
+        # Learn only from samples that look like an idle line. Judge that
+        # against the BASELINE, not the threshold: a threshold set too high
+        # makes every sample look quiet, so the console's own signal would be
+        # learned - which is exactly the case the near-miss warning exists for.
+        idle_like = avg <= state["baseline"] * NEAR_MISS_FACTOR
+        if duplex and state["on"] and not state["busy_at"] and idle_like:
+            state["baseline"] += BASELINE_ALPHA * (avg - state["baseline"])
+
+        # Elevated but not enough to trigger - count it and say so.
+        if duplex and warm and state["on"] and quiet and state["baseline"]:
+            if avg > state["baseline"] * NEAR_MISS_FACTOR:
+                state["near"] += 1
+                if state["near"] >= 3 and now - state["warned_at"] > 30:
+                    state["warned_at"] = now
+                    logging.info("LINE: activity at %.1f never reaches the cut "
+                                 "threshold %.1f (baseline %.1f). The console may "
+                                 "be dialling unheard - try a higher TX_GAIN."
+                                 % (avg, threshold, state["baseline"]))
+            else:
+                state["near"] = 0
+
+        if duplex and warm and state["on"] and not quiet:
             if not state["busy_at"]:
                 state["busy_at"] = now
                 if DEBUG_LINE:
@@ -392,8 +441,9 @@ def pumpModem(modem, duplex, state):
                 logging.info("LINE: nothing dialled, resuming dial tone")
 
         if DEBUG_LINE and now - state["log_at"] >= 2.0:
-            logging.info("LINE: level avg=%5.1f peak=%3d  %s" % (
-                avg, peak, "AUDIO PRESENT" if avg > 2 else "silence"))
+            logging.info("LINE: level avg=%5.1f peak=%3d  base=%4.1f cut=%4.1f%s" % (
+                avg, peak, state["baseline"], threshold,
+                "" if warm else "  (warming up)"))
             state["log_at"] = now
 
     return digits
