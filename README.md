@@ -101,6 +101,32 @@ To see what your console actually sends - rarely necessary now, but useful when
 debugging - add `show-password` to `/etc/ppp/options` temporarily and dial. PAP is
 cleartext, so the password appears in the log instead of `<hidden>`.
 
+## Command-line Options and Tuning
+
+```
+--no-dial-tone   Do not synthesise a dial tone; listen in half duplex. The console
+                 then needs to blind dial (ATX3).
+--debug-line     Log DLE call-progress events (RING, BUSY, DIAL TONE...) and a
+                 periodic level meter of the audio coming back from the line.
+                 Use this when a console refuses to dial and you need to know
+                 whether it ever went off-hook.
+```
+
+Environment overrides, all optional:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `MODEM_TTY` | auto-detected | Serial device, e.g. `ttyACM1` |
+| `MGETTY_BIN` | auto-detected | Path to mgetty |
+| `TX_GAIN` | `128` | Modem transmit gain (`AT+VGT`). The default is deliberate - higher values overdrive the tone and the returning audio clips at full scale. |
+| `TONE_CUT_LEVEL` | `20` | Incoming audio level that counts as "console is dialling" and stops the tone. Idle echo measures ~12; a console off-hook pushes it past 25. Lower it if a console dials too quietly to be noticed. |
+
+Example:
+
+```bash
+sudo -E TONE_CUT_LEVEL=12 python3 dreampi3.py --debug-line
+```
+
 ## mgetty AutoPPP (required)
 
 When mgetty receives an LCP configure request it looks up the magic `/AutoPPP/` user
@@ -196,6 +222,12 @@ remote IP address 192.168.1.200
   350+440 Hz tone over full-duplex `AT+VTR`, cutting it on the first digit as a real
   exchange does. Pass `--no-dial-tone` to disable it. If the modem refuses `AT+VTR` the
   script says so and falls back to half duplex, where `ATX3` is required on the console.
+
+  The tone stops on the first *line activity*, not on the first decoded digit. It has to:
+  the tone desensitises the modem's DTMF detector, so waiting for a decoded digit
+  deadlocks - the tone blocks detection, nothing decodes, the tone never stops. Observed
+  with Phantasy Star Online Ver.2, which could not dial at all until this was changed,
+  while Quake III Arena happened to dial loudly enough to punch through.
 
 - **Fixed: `Connected!` was not always reported.** The log follow was started after
   mgetty with `-n 0` (new entries only), so pppd's `remote IP address` could be logged

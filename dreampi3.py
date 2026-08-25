@@ -91,6 +91,26 @@ CHUNK_MS = 20                 # transmit granularity
 CHUNK = SAMPLE_RATE * CHUNK_MS // 1000
 DLE, ETX = 0x10, 0x03
 
+# --debug-line reports what the modem hears: DLE-shielded call-progress
+# events, and a periodic level meter of the audio coming back from the line.
+# Useful when a console refuses to dial and you need to know whether it ever
+# went off-hook at all.
+DEBUG_LINE = "--debug-line" in sys.argv
+TX_GAIN = os.environ.get("TX_GAIN", "128")   # modem default
+
+# The tone desensitises the modem's DTMF detector, so it has to stop as soon as
+# the console starts dialling - not once a digit has been decoded, which would
+# deadlock: tone blocks detection, so nothing is decoded, so the tone never
+# stops. A real exchange cuts dial tone on the first dialling energy it sees.
+# Idle level (our own echo) measures ~12; a console off-hook pushes it past 25.
+TONE_CUT_LEVEL = float(os.environ.get("TONE_CUT_LEVEL", "20"))
+TONE_RESUME_AFTER = 6.0       # restore the tone if nothing was actually dialled
+VOICE_EVENTS = {
+    "R": "RING", "b": "BUSY tone", "d": "DIAL TONE detected",
+    "o": "OVERRUN", "s": "SILENCE", "q": "QUIET", "c": "FAX CNG",
+    "e": "LINE ERROR", "h": "FAR-END ON-HOOK", "X": "DTMF start",
+}
+
 def _renderDialTone():
     """One second of 350+440 Hz, 8-bit unsigned PCM (128 = silence)."""
     buf = bytearray()
@@ -185,7 +205,10 @@ def initModem():
         return modem, False
 
     send_command(modem, "AT+VSM=1,8000")  # 8-bit unsigned PCM @ 8kHz
-    send_command(modem, "AT+VGT=200")     # transmit gain
+    # Transmit gain. The modem default is 128; pushing it higher overdrives the
+    # tone and the returning audio clips at full scale, which some consoles
+    # misread as a busy/reorder cadence rather than dial tone.
+    send_command(modem, "AT+VGT=%s" % TX_GAIN)
     send_command(modem, "AT+VLS=1")       # Go online
 
     # AT+VTR is full duplex: transmit the tone and decode DTMF at once.
@@ -252,7 +275,10 @@ def linkIsUp():
                            stdout=subprocess.DEVNULL) == 0
 
 def newToneState():
-    return {"pos": 0, "next_tx": time.time(), "on": True, "pending": False}
+    now = time.time()
+    return {"pos": 0, "next_tx": now, "on": True, "pending": False,
+            "lvl_n": 0, "lvl_sum": 0, "lvl_peak": 0, "lvl_at": now,
+            "log_at": now, "cut_at": 0.0, "got_digit": False}
 
 def pumpModem(modem, duplex, state):
     """One pass of the listen loop; returns any DTMF digits seen.
@@ -305,6 +331,8 @@ def pumpModem(modem, duplex, state):
                 c = chr(b) if 32 <= b < 127 else ""
                 if c.isdigit():
                     digits.append(c)
+                elif DEBUG_LINE and c in VOICE_EVENTS:
+                    logging.info("LINE: %s" % VOICE_EVENTS[c])
             i += 1
             continue
         if b == DLE:
@@ -317,9 +345,42 @@ def pumpModem(modem, duplex, state):
                 c = chr(nb) if 32 <= nb < 127 else ""
                 if c.isdigit():
                     digits.append(c)
+                elif DEBUG_LINE and c in VOICE_EVENTS:
+                    logging.info("LINE: %s" % VOICE_EVENTS[c])
             i += 2
             continue
+        dev = abs(b - 128)            # audio sample; 128 is silence
+        state["lvl_sum"] += dev
+        state["lvl_peak"] = max(state["lvl_peak"], dev)
+        state["lvl_n"] += 1
         i += 1
+
+    if digits:
+        state["got_digit"] = True
+
+    now = time.time()
+    if state["lvl_n"] and now - state["lvl_at"] >= 0.4:
+        avg = state["lvl_sum"] / state["lvl_n"]
+        peak = state["lvl_peak"]
+        state["lvl_n"] = state["lvl_sum"] = state["lvl_peak"] = 0
+        state["lvl_at"] = now
+
+        if duplex and state["on"] and avg > TONE_CUT_LEVEL:
+            state["on"] = False       # console is on the line - get out of its way
+            state["cut_at"] = now
+            if DEBUG_LINE:
+                logging.info("LINE: activity (avg=%.1f), cutting dial tone" % avg)
+        elif (duplex and not state["on"] and not state["got_digit"]
+              and now - state["cut_at"] > TONE_RESUME_AFTER):
+            state["on"] = True        # false alarm - the console still needs it
+            if DEBUG_LINE:
+                logging.info("LINE: nothing dialled, resuming dial tone")
+
+        if DEBUG_LINE and now - state["log_at"] >= 2.0:
+            logging.info("LINE: level avg=%5.1f peak=%3d  %s" % (
+                avg, peak, "AUDIO PRESENT" if avg > 2 else "silence"))
+            state["log_at"] = now
+
     return digits
 
 def main():
